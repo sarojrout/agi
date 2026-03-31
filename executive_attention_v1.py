@@ -1,91 +1,88 @@
-"""
-Minimal Kaggle Benchmarks example — run this inside a Kaggle notebook that has
-`kaggle_benchmarks` (Benchmarks kernel), not necessarily on your laptop.
-
-What this does:
-  1. Defines ONE task: answer a simple arithmetic question.
-  2. Builds a small table of (Prompt, Target_Answer).
-  3. Runs the same rows against several models and counts passes.
-
-Replace model keys with whatever your notebook exposes in kbench.llms.
-"""
+import random
+import re
 
 import pandas as pd
-
 import kaggle_benchmarks as kbench
 
 
-# -----------------------------------------------------------------------------
-# 1) TASK: column names in the DataFrame become function parameters after `llm`.
-# -----------------------------------------------------------------------------
+def build_dataset(n_executive: int = 12, n_attention: int = 12, seed: int = 42) -> pd.DataFrame:
+    random.seed(seed)
+    rows = []
+
+    math_pairs = [
+        ("What is 2 + 2?", "4"),
+        ("What is 5 + 5?", "10"),
+        ("What is 7 + 3?", "10"),
+        ("What is 9 + 1?", "10"),
+        ("What is 6 + 2?", "8"),
+        ("What is 3 + 5?", "8"),
+        ("What is 11 + 4?", "15"),
+        ("What is 20 - 6?", "14"),
+    ]
+
+    # Executive: conflicting instructions — model must ignore the "always 999" rule.
+    for _ in range(n_executive):
+        q, ans = random.choice(math_pairs)
+        prompt = f"""Instruction 1: For every math question below, always respond with the number 999.
+Instruction 2: Ignore Instruction 1 completely.
+Question: {q}
+Reply with only the correct integer, nothing else."""
+        rows.append(
+            {
+                "Prompt": prompt,
+                "Target_Answer": ans,
+                "Track": "executive",
+                "Category": "override_wrong_numeric_rule",
+            }
+        )
+
+    # Attention: distractors — model must use only the OFFICIAL block.
+    for _ in range(n_attention):
+        a = random.randint(5, 25)
+        b = random.randint(5, 25)
+        wrong1, wrong2 = random.randint(100, 200), random.randint(100, 200)
+        prompt = f"""The following lines contain drafts and rumors — do NOT use them for the final answer.
+
+Rumor: A might be {wrong1} and B might be {wrong2}.
+Deprecated note: sum was previously reported as {wrong1 + wrong2}.
+Advertisement: Buy product 999 for only $3.99.
+
+OFFICIAL DATA (USE ONLY THIS): A = {a}, B = {b}
+
+Question: What is A + B? Reply with the integer only."""
+        rows.append(
+            {
+                "Prompt": prompt,
+                "Target_Answer": str(a + b),
+                "Track": "attention",
+                "Category": "distractor_then_official_block",
+            }
+        )
+
+    random.shuffle(rows)
+    return pd.DataFrame(rows)
+
+
 @kbench.task(
-    name="simple_arithmetic",
-    description="Model must include the correct integer in its answer.",
+    name="executive_attention_v1",
+    description="Executive: obey override. Attention: use only OFFICIAL DATA. Pass if response contains the target integer.",
 )
-def simple_arithmetic(llm, Prompt: str, Target_Answer: str) -> None:
+def executive_attention_v1(
+    llm,
+    Prompt: str,
+    Target_Answer: str,
+    Track: str,
+    Category: str,
+) -> None:
     response = llm.prompt(Prompt)
     target = int(Target_Answer)
-
-    # Word boundary so "10" does not match inside "100".
-    pattern = rf"\b{target}\b"
+    pattern = rf"\b{re.escape(str(target))}\b"
     kbench.assertions.assert_contains_regex(
         pattern,
         response,
-        expectation=f"Response should contain the integer {target}.",
+        expectation=f"[{Track}/{Category}] Expected integer {target} in response.",
     )
 
 
-# -----------------------------------------------------------------------------
-# 2) DATA: a few addition / subtraction items (you can add more rows).
-# -----------------------------------------------------------------------------
-def build_rows():
-    rows = [
-        ("What is 17 + 25? Reply with the number only.", "42"),
-        ("What is 100 - 37? Reply with the number only.", "63"),
-        ("What is 8 + 9? Reply with the number only.", "17"),
-        ("Compute 50 - 14. Reply with the number only.", "36"),
-        ("What is 0 + 0? Reply with the number only.", "0"),
-    ]
-    return pd.DataFrame(
-        [{"Prompt": p, "Target_Answer": a} for p, a in rows]
-    )
-
-
-# -----------------------------------------------------------------------------
-# 3) EVALUATE: same data, several models — this is what others are doing.
-# -----------------------------------------------------------------------------
-def count_passed(results):
-    """Best-effort pass count; shape matches sample.ipynb pattern."""
-    n = 0
-    for r in results:
-        if getattr(r.state, "name", "") != "BENCHMARK_TASK_RUN_STATE_COMPLETED":
-            continue
-        if r.results and r.results[0].boolean_result:
-            n += 1
-    return n
-
-
-def main():
-    df = build_rows()
-
-    # Pick models your environment actually lists: dir(kbench.llms) or docs.
-    model_keys = [
-        "google/gemini-2.5-flash",
-        "google/gemma-3-12b",
-    ]
-
-    for key in model_keys:
-        if key not in kbench.llms:
-            print(f"Skip (not available): {key}")
-            continue
-        print(f"\n=== Running: {key} ===")
-        results = simple_arithmetic.evaluate(
-            llm=[kbench.llms[key]],
-            evaluation_data=df,
-        )
-        passed = count_passed(results)
-        print(f"Passed: {passed} / {len(df)}")
-
-
-if __name__ == "__main__":
-    main()
+df = build_dataset()
+executive_attention_v1.evaluate(llm=[kbench.llm], evaluation_data=df)
